@@ -1,0 +1,2 @@
+COMPONENT=DistributedStorageAppC
+include $(MAKERULES)
