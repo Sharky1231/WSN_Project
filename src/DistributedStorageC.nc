@@ -1,6 +1,7 @@
 #include <Timer.h>
 #include "printf.h"
 #include "DistributedStorage.h"
+#include "TestSerial.h"
 #include <UserButton.h>
 
 module DistributedStorageC {
@@ -13,6 +14,12 @@ module DistributedStorageC {
 	uses interface Packet;
 	uses interface AMSend;
 	uses interface SplitControl as AMControl;
+
+	// Serial Com interface
+	uses interface AMSend as SerialSend;
+	uses interface Receive as SerialReceive;
+	uses interface Packet as SerialPacket;
+	uses interface BlockRead as SerialBlockRead;
 
 	// Receive interface
 	uses interface Receive;
@@ -33,6 +40,7 @@ implementation {
 
 	// Struct for storing data
 	LogDataMsg logData;
+	LogDataMsg node_data_to_send;
 	LogDataMsg node_data_array[N_NODES];
 
 	// Holds data for transmission
@@ -45,6 +53,7 @@ implementation {
 	uint16_t number_of_synchronized_nodes = 0;
 	uint16_t node_data;
 
+	test_serial_msg_t * serialComm;
 	// Variables for saving data -------------
 	uint32_t address = 0;
 	uint16_t offset[3] = {0};
@@ -58,6 +67,9 @@ implementation {
 	uint16_t receivedDataOffset = 0;
 	//-------------------------
 
+	uint16_t baseAddress[3]={NODE_1_BASE_ADDR,NODE_2_BASE_ADDR,NODE_3_BASE_ADDR};
+	uint8_t currentPartition;
+	bool locked = FALSE;
 	int readMoteID = 0;
 	uint16_t readCnt = 0;
 	bool allDataWasShared = FALSE;
@@ -121,6 +133,7 @@ implementation {
 	 * Synchronizes with other node.
 	 * Sends out a sync message as a periodic function, until all notes are synchronized
 	 * Should only be used by node 0
+	 * @param LogDataMsg received package
 	 */
 	void sync_node() {
 		call SyncTimer.startPeriodic(NODE_PERIOD_MILLI);
@@ -385,6 +398,57 @@ implementation {
 		return msg;
 	}
 
+
+	// this is for the serial message from PC
+	event message_t* SerialReceive.receive(message_t * msg, void * payload, uint8_t len) {
+		call Leds.led0On();
+		printf("I received a serial request\n");
+		if(len == sizeof(test_serial_msg_t)) {
+			
+			test_serial_msg_t * recievedPacket = (test_serial_msg_t * ) payload;	
+			if (recievedPacket->comm == FLASH){
+				printf("I'm reading my flash memory'\n");	
+				call Leds.led1On();
+				readMoteID=0;
+				address=baseAddress[recievedPacket->data];
+				readMoteID=recievedPacket->data;
+				if(call SerialBlockRead.read(address+readCnt, &node_data_array[readMoteID], sizeof(LogDataMsg)) == SUCCESS){	//Read all the currently written data from a single partition
+					printf("Read SUCCESS\n");	
+				}	
+			}	
+		}
+		return msg;
+	}
+	
+	event void SerialBlockRead.readDone(storage_addr_t addr, void *buf, storage_len_t len, error_t error){
+		test_serial_msg_t* packetToSend = (test_serial_msg_t*)(call SerialPacket.getPayload(&pkt, sizeof (test_serial_msg_t)));	
+		call Leds.led2On();	
+		packetToSend->comm = FLASHRESPONSE; //check that java knows this
+		packetToSend->data = node_data_array[readMoteID].data;
+
+		if (call SerialSend.send(AM_BROADCAST_ADDR, &pkt, sizeof(test_serial_msg_t)) == SUCCESS) {
+			locked = TRUE;
+		}
+	}
+	
+	event void SerialSend.sendDone(message_t* bufPtr, error_t error) {
+		call Leds.led0Off();
+		call Leds.led1Off();
+ 		call Leds.led2Off();
+ 		printf("Serial Send done\n");
+		locked = FALSE;
+		readCnt = readCnt + 6;
+		if(readCnt < offset[readMoteID] && address<baseAddress[4]){
+			if(call BlockRead.read(address+readCnt, &node_data_array[readMoteID], sizeof(LogDataMsg)) == SUCCESS){	//Read all the currently written data from a single partition
+				call Leds.led2Toggle();				
+			}else{
+				printf("Read FAIL\n");
+			}
+		}else{
+			printf("Error\n");
+		}		
+	}
+	
 	//Block interface methods
 	event void BlockWrite.writeDone(storage_addr_t addr, void * buf, storage_len_t len, error_t error) {
 		call Leds.led1Toggle();
@@ -457,4 +521,9 @@ implementation {
 			}
 		}
 	}
+	
+		event void SerialBlockRead.computeCrcDone(storage_addr_t addr, storage_len_t len, uint16_t crc, error_t error){
+	}
+	
+	
 }
